@@ -722,6 +722,24 @@ bot.on(['text', 'photo', 'video', 'animation'], async (ctx) => {
     } catch (error) { console.error(error); ctx.reply("❌ Gagal memproses pesan menfess kamu."); }
 });
 
-bot.launch().then(() => console.log("🚀 Fitur Manajemen Kuota + Hak Akses Hapus Postingan Dinamis Berhasil Diaktifkan!")).catch((err) => console.error(err));
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+// HAPUS BLOK BOT.LAUNCH() LAMA KAMU, GANTI DENGAN KODE INI:
+
+export default async (req, res) => {
+    try {
+        if (req.method === 'POST') {
+            // Ini untuk memproses pesan yang masuk dari Telegram ke Vercel
+            await bot.handleUpdate(req.body);
+            if (!res.writableEnded) {
+                res.status(200).json({ ok: true });
+            }
+        } else {
+            // Ini tampilan kalau link https://botmenfess.vercel.app dibuka di browser
+            res.status(200).send('🟢 Bot Menfess is Running via Webhook!');
+        }
+    } catch (err) {
+        console.error("Webhook Error:", err.message);
+        if (!res.writableEnded) {
+            res.status(500).send('Internal Server Error');
+        }
+    }
+};
