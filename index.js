@@ -31,15 +31,33 @@ async function checkMembership(ctx, userId, channelId, groupId) {
         return { channel: true, group: true, all: true };
     }
 
-    try {
-        const member = await ctx.telegram.getChatMember(channelId, userId);
-        if (['creator', 'administrator', 'member'].includes(member.status)) joinedChannel = true;
-    } catch (err) { console.error("⚠️ Gagal cek status channel:", err.message); }
+    // Function helper untuk retry dengan delay (handle Telegram API delay saat user baru join)
+    async function checkChatMemberWithRetry(telegramCtx, chatId, uid, retries = 2) {
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            try {
+                const member = await telegramCtx.telegram.getChatMember(chatId, uid);
+                if (['creator', 'administrator', 'member'].includes(member.status)) {
+                    return true;
+                }
+                return false;
+            } catch (err) {
+                if (attempt < retries) {
+                    // Tunggu 1 detik sebelum retry
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                } else {
+                    console.error(`⚠️ Gagal cek status chat member setelah ${retries + 1} percobaan:`, err.message);
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
 
-    try {
-        const member = await ctx.telegram.getChatMember(groupId, userId);
-        if (['creator', 'administrator', 'member'].includes(member.status)) joinedGroup = true;
-    } catch (err) { console.error("⚠️ Gagal cek status grup:", err.message); }
+    // Cek Channel dengan retry
+    joinedChannel = await checkChatMemberWithRetry(ctx, channelId, userId, 2);
+
+    // Cek Grup dengan retry
+    joinedGroup = await checkChatMemberWithRetry(ctx, groupId, userId, 2);
 
     return { channel: joinedChannel, group: joinedGroup, all: joinedChannel && joinedGroup };
 }
