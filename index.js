@@ -20,6 +20,10 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 // Menyimpan status/state admin saat sedang input data
 const adminStates = {};
 
+function isPrivateChat(ctx) {
+    return ctx.chat && ctx.chat.type === 'private';
+}
+
 // ========================================================
 // UTILITY FUNCTIONS
 // ========================================================
@@ -36,13 +40,13 @@ async function checkMembership(ctx, userId, channelId, groupId) {
         for (let attempt = 0; attempt <= retries; attempt++) {
             try {
                 const member = await telegramCtx.telegram.getChatMember(chatId, uid);
-                if (['creator', 'administrator', 'member'].includes(member.status)) {
+                if (['creator', 'administrator', 'member', 'restricted'].includes(member.status)) {
                     return true;
                 }
                 return false;
             } catch (err) {
                 if (attempt < retries) {
-                    // Tunggu 1 detik sebelum retry
+                    // Tunggu 1 detik sebelum retry agar Telegram API punya waktu update status
                     await new Promise(resolve => setTimeout(resolve, 1000));
                 } else {
                     console.error(`⚠️ Gagal cek status chat member setelah ${retries + 1} percobaan:`, err.message);
@@ -151,7 +155,13 @@ async function handleStartLogic(ctx, isCallback = false) {
     } catch (error) { console.error(error); }
 }
 
-bot.start((ctx) => handleStartLogic(ctx, false));
+bot.start(async (ctx) => {
+    if (!isPrivateChat(ctx)) {
+        return ctx.reply('⚠️ Bot ini hanya bekerja di chat pribadi. Buka chat langsung dengan bot dan ketik /start di sana.');
+    }
+    await handleStartLogic(ctx, false);
+});
+
 bot.action('check_sub', async (ctx) => { try { await ctx.deleteMessage(); } catch (e) { } await handleStartLogic(ctx, true); });
 
 bot.action('view_profile', async (ctx) => {
@@ -435,6 +445,8 @@ bot.command('cancel', (ctx) => {
 // LOGIKA KOLEKTOR INPUT ADM & PROSES PENERIMAAN MENFESS
 // ========================================================
 bot.on(['text', 'photo', 'video', 'animation'], async (ctx) => {
+    if (!isPrivateChat(ctx)) return;
+
     const userId = ctx.from.id;
     const username = ctx.from.username ? `@${ctx.from.username}` : 'Tidak ada';
     const nickname = ctx.from.first_name || 'Tidak ada';
