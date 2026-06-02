@@ -444,7 +444,7 @@ bot.command('cancel', (ctx) => {
 // ========================================================
 // LOGIKA KOLEKTOR INPUT ADM & PROSES PENERIMAAN MENFESS
 // ========================================================
-bot.on(['text', 'photo', 'video', 'animation'], async (ctx) => {
+bot.on(['text', 'photo', 'video', 'animation', 'voice'], async (ctx) => {
     if (!isPrivateChat(ctx)) return;
 
     const userId = ctx.from.id;
@@ -693,7 +693,7 @@ bot.on(['text', 'photo', 'video', 'animation'], async (ctx) => {
             }
         }
 
-        const isMedia = ctx.message.photo || ctx.message.video || ctx.message.animation;
+        const isMedia = ctx.message.photo || ctx.message.video || ctx.message.animation || ctx.message.voice;
 
         const currentUserTextQuota = userDb ? userDb.text_quota : (settings.default_text_quota ?? 15);
         const currentUserMediaQuota = userDb ? userDb.media_quota : (settings.default_media_quota ?? 5);
@@ -717,6 +717,8 @@ bot.on(['text', 'photo', 'video', 'animation'], async (ctx) => {
                 sentMessage = await ctx.telegram.sendVideo(settings.channel_id, ctx.message.video.file_id, { caption: finalCaption, parse_mode: 'Markdown' });
             } else if (ctx.message.animation) {
                 sentMessage = await ctx.telegram.sendAnimation(settings.channel_id, ctx.message.animation.file_id, { caption: finalCaption, parse_mode: 'Markdown' });
+            } else if (ctx.message.voice) {
+                sentMessage = await ctx.telegram.sendVoice(settings.channel_id, ctx.message.voice.file_id, { caption: finalCaption, parse_mode: 'Markdown' });
             }
         } else {
             const finalTeks = ctx.message.text + footerTeks;
