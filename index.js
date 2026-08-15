@@ -24,55 +24,125 @@ function isPrivateChat(ctx) {
     return ctx.chat && ctx.chat.type === 'private';
 }
 
+// In-memory cache untuk status membership user agar tidak selalu mengecek ulang ke Telegram API (TTL: 1 jam)
+const membershipCache = new Map();
+const CACHE_TTL_MS = 60 * 60 * 1000;
+
+function getCachedMembership(userId) {
+    const cached = membershipCache.get(userId);
+    if (cached && (Date.now() - cached.timestamp < CACHE_TTL_MS)) {
+        return cached.result;
+    }
+    return null;
+}
+
+function setCachedMembership(userId, result) {
+    if (result && result.all) {
+        membershipCache.set(userId, {
+            timestamp: Date.now(),
+            result: result
+        });
+    } else {
+        membershipCache.delete(userId);
+    }
+}
+
+function isValidChatId(id) {
+    if (!id) return false;
+    const str = String(id).trim();
+    return !(str === '' || str === '-100xxxxx' || str === '0' || str === '-' || str === 'undefined' || str === 'null');
+}
+
 // ========================================================
 // UTILITY FUNCTIONS
 // ========================================================
-async function checkMembership(ctx, userId, channelId, groupId) {
-    let joinedChannel = false;
-    let joinedGroup = false;
+async function checkMembership(ctx, userId, channelId, groupId, forceCheck = false) {
+    // 1. Jika tidak dipaksa cek ulang, periksa cache terlebih dahulu
+    if (!forceCheck) {
+        const cached = getCachedMembership(userId);
+        if (cached) {
+            return cached;
+        }
+    }
 
-    if (channelId === '-100xxxxx' || groupId === '-100xxxxx') {
+    const hasValidChannel = isValidChatId(channelId);
+    const hasValidGroup = isValidChatId(groupId);
+
+    // Jika channel dan grup tidak dikonfigurasi, loloskan semua
+    if (!hasValidChannel && !hasValidGroup) {
         return { channel: true, group: true, all: true };
     }
 
-    // Function helper untuk retry dengan delay (handle Telegram API delay saat user baru join)
-    async function checkChatMemberWithRetry(telegramCtx, chatId, uid, retries = 2) {
-        for (let attempt = 0; attempt <= retries; attempt++) {
-            try {
-                const member = await telegramCtx.telegram.getChatMember(chatId, uid);
-                if (['creator', 'administrator', 'member', 'restricted'].includes(member.status)) {
-                    return true;
-                }
-                return false;
-            } catch (err) {
-                if (attempt < retries) {
-                    // Tunggu 1 detik sebelum retry agar Telegram API punya waktu update status
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                } else {
-                    console.error(`⚠️ Gagal cek status chat member setelah ${retries + 1} percobaan:`, err.message);
-                    return false;
-                }
-            }
+    // Helper cek status member ke Telegram API
+    async function checkSingleChat(telegramCtx, chatId, uid) {
+        if (!isValidChatId(chatId)) return true;
+
+        let targetChatId = chatId;
+        if (typeof chatId === 'string' && /^-?\d+$/.test(chatId.trim())) {
+            targetChatId = chatId.trim();
         }
-        return false;
+
+        try {
+            const member = await telegramCtx.telegram.getChatMember(targetChatId, uid);
+            if (['creator', 'administrator', 'member'].includes(member.status)) {
+                return true;
+            }
+            if (member.status === 'restricted' && member.is_member !== false) {
+                return true;
+            }
+            return false;
+        } catch (err) {
+            const errMsg = (err.message || '').toLowerCase();
+            console.error(`⚠️ Info cek chat member (${targetChatId}):`, err.message);
+
+            // Jika error disebabkan bot belum jadi admin / bot tidak punya hak akses / chat not found
+            // Jangan memblokir user karena kesalahan izin bot
+            if (errMsg.includes('chat not found') ||
+                errMsg.includes('admin') ||
+                errMsg.includes('member list is inaccessible') ||
+                errMsg.includes('not enough rights') ||
+                errMsg.includes('bot was kicked')) {
+                console.warn(`⚠️ Bot tidak memiliki akses admin di chat ${targetChatId}. Validasi chat dilewati.`);
+                return true;
+            }
+
+            // Jika error jelas bahwa user bukan peserta chat
+            if (errMsg.includes('user not found') || errMsg.includes('participant')) {
+                return false;
+            }
+
+            return false;
+        }
     }
 
-    // Cek Channel dengan retry
-    joinedChannel = await checkChatMemberWithRetry(ctx, channelId, userId, 2);
+    const joinedChannel = hasValidChannel ? await checkSingleChat(ctx, channelId, userId) : true;
+    const joinedGroup = hasValidGroup ? await checkSingleChat(ctx, groupId, userId) : true;
 
-    // Cek Grup dengan retry
-    joinedGroup = await checkChatMemberWithRetry(ctx, groupId, userId, 2);
+    const result = { channel: joinedChannel, group: joinedGroup, all: joinedChannel && joinedGroup };
 
-    return { channel: joinedChannel, group: joinedGroup, all: joinedChannel && joinedGroup };
+    // Simpan ke cache jika sukses terverifikasi
+    if (result.all) {
+        setCachedMembership(userId, result);
+    }
+
+    return result;
 }
 
 function generateJoinKeyboard(settings, checkStatus) {
     const buttons = [];
-    const cleanChannelId = settings.channel_id.replace('-100', '');
-    const cleanGroupId = settings.group_id.replace('-100', '');
+    const rawChannelId = String(settings?.channel_id || '').trim();
+    const rawGroupId = String(settings?.group_id || '').trim();
 
-    const channelLink = settings.channel_id !== '-1003979281878' ? `https://t.me/c/${cleanChannelId}/1` : 'https://t.me/persekentutanfess';
-    const groupLink = settings.group_id !== '-1003982415611' ? `https://t.me/c/${cleanGroupId}/1` : 'https://t.me/+ptJEewUHrG03YmI1';
+    const cleanChannelId = rawChannelId.replace('-100', '');
+    const cleanGroupId = rawGroupId.replace('-100', '');
+
+    const channelLink = (rawChannelId && rawChannelId !== '-1003979281878' && rawChannelId !== '-100xxxxx')
+        ? (rawChannelId.startsWith('@') ? `https://t.me/${rawChannelId.slice(1)}` : `https://t.me/c/${cleanChannelId}/1`)
+        : 'https://t.me/persekentutanfess';
+
+    const groupLink = (rawGroupId && rawGroupId !== '-1003982415611' && rawGroupId !== '-100xxxxx')
+        ? (rawGroupId.startsWith('@') ? `https://t.me/${rawGroupId.slice(1)}` : `https://t.me/c/${cleanGroupId}/1`)
+        : 'https://t.me/+ptJEewUHrG03YmI1';
 
     if (!checkStatus.channel) buttons.push([Markup.button.url('📢 Join Channel Kentutmenfess', channelLink)]);
     if (!checkStatus.group) buttons.push([Markup.button.url('💬 Join Grup Persekentutan', groupLink)]);
@@ -93,7 +163,7 @@ async function logAdminAction(adminId, adminNickname, action, targetId = null) {
 // ========================================================
 // HANDLER: /start UTAMA
 // ========================================================
-async function handleStartLogic(ctx, isCallback = false) {
+async function handleStartLogic(ctx, isCallback = false, forceCheck = false) {
     const from = ctx.from;
     const userId = from.id;
     const username = from.username ? `@${from.username}` : 'Tidak ada';
@@ -129,7 +199,7 @@ async function handleStartLogic(ctx, isCallback = false) {
         }
 
         if (!isCurrentlyAdmin) {
-            const check = await checkMembership(ctx, userId, settings.channel_id, settings.group_id);
+            const check = await checkMembership(ctx, userId, settings.channel_id, settings.group_id, forceCheck || isCallback);
             if (!check.all) {
                 const msgTeks = !check.channel && !check.group ? settings.msg_not_joined : settings.msg_half_joined;
                 if (isCallback) await ctx.answerCbQuery("❌ Kamu belum bergabung di semua tujuan wajib!", { show_alert: true });
@@ -159,10 +229,14 @@ bot.start(async (ctx) => {
     if (!isPrivateChat(ctx)) {
         return ctx.reply('⚠️ Bot ini hanya bekerja di chat pribadi. Buka chat langsung dengan bot dan ketik /start di sana.');
     }
-    await handleStartLogic(ctx, false);
+    await handleStartLogic(ctx, false, false);
 });
 
-bot.action('check_sub', async (ctx) => { try { await ctx.deleteMessage(); } catch (e) { } await handleStartLogic(ctx, true); });
+bot.action('check_sub', async (ctx) => { 
+    try { await ctx.deleteMessage(); } catch (e) { } 
+    membershipCache.delete(ctx.from.id);
+    await handleStartLogic(ctx, true, true); 
+});
 
 bot.action('view_profile', async (ctx) => {
     try {
