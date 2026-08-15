@@ -24,90 +24,70 @@ function isPrivateChat(ctx) {
     return ctx.chat && ctx.chat.type === 'private';
 }
 
-// In-memory cache untuk status membership user agar tidak selalu mengecek ulang ke Telegram API (TTL: 1 jam)
-const membershipCache = new Map();
-const CACHE_TTL_MS = 60 * 60 * 1000;
-
-function getCachedMembership(userId) {
-    const cached = membershipCache.get(userId);
-    if (cached && (Date.now() - cached.timestamp < CACHE_TTL_MS)) {
-        return cached.result;
-    }
-    return null;
-}
-
-function setCachedMembership(userId, result) {
-    if (result && result.all) {
-        membershipCache.set(userId, {
-            timestamp: Date.now(),
-            result: result
-        });
-    } else {
-        membershipCache.delete(userId);
-    }
-}
-
 function isValidChatId(id) {
     if (!id) return false;
     const str = String(id).trim();
     return !(str === '' || str === '-100xxxxx' || str === '0' || str === '-' || str === 'undefined' || str === 'null');
 }
 
+function formatTelegramChatId(chatId) {
+    if (!isValidChatId(chatId)) return null;
+    const str = String(chatId).trim();
+    if (str.startsWith('@')) return str;
+    if (str.startsWith('-100')) return str;
+    if (str.startsWith('-')) return `-100${str.replace('-', '')}`;
+    if (/^\d{8,}$/.test(str)) return `-100${str}`;
+    return str;
+}
+
 // ========================================================
 // UTILITY FUNCTIONS
 // ========================================================
-async function checkMembership(ctx, userId, channelId, groupId, forceCheck = false) {
-    // 1. Jika tidak dipaksa cek ulang, periksa cache terlebih dahulu
-    if (!forceCheck) {
-        const cached = getCachedMembership(userId);
-        if (cached) {
-            return cached;
-        }
-    }
-
+async function checkMembership(ctx, userId, channelId, groupId) {
     const hasValidChannel = isValidChatId(channelId);
     const hasValidGroup = isValidChatId(groupId);
 
-    // Jika channel dan grup tidak dikonfigurasi, loloskan semua
+    // Jika channel dan grup tidak dikonfigurasi, loloskan
     if (!hasValidChannel && !hasValidGroup) {
         return { channel: true, group: true, all: true };
     }
 
-    // Helper cek status member ke Telegram API
-    async function checkSingleChat(telegramCtx, chatId, uid) {
-        if (!isValidChatId(chatId)) return true;
-
-        let targetChatId = chatId;
-        if (typeof chatId === 'string' && /^-?\d+$/.test(chatId.trim())) {
-            targetChatId = chatId.trim();
-        }
+    // Helper cek status member secara real-time via Telegram API
+    async function checkSingleChat(telegramCtx, rawChatId, uid) {
+        const targetChatId = formatTelegramChatId(rawChatId);
+        if (!targetChatId) return true;
 
         try {
             const member = await telegramCtx.telegram.getChatMember(targetChatId, uid);
+            
+            // Status valid yang menandakan user masih berada di dalam grup / channel:
             if (['creator', 'administrator', 'member'].includes(member.status)) {
                 return true;
             }
-            if (member.status === 'restricted' && member.is_member !== false) {
+            if (member.status === 'restricted' && member.is_member === true) {
                 return true;
             }
+
+            // Jika status 'left', 'kicked', atau bukan member
             return false;
         } catch (err) {
             const errMsg = (err.message || '').toLowerCase();
-            console.error(`⚠️ Info cek chat member (${targetChatId}):`, err.message);
+            console.error(`⚠️ Pengecekan chat member (${targetChatId}):`, err.message);
 
-            // Jika error disebabkan bot belum jadi admin / bot tidak punya hak akses / chat not found
-            // Jangan memblokir user karena kesalahan izin bot
-            if (errMsg.includes('chat not found') ||
-                errMsg.includes('admin') ||
-                errMsg.includes('member list is inaccessible') ||
-                errMsg.includes('not enough rights') ||
-                errMsg.includes('bot was kicked')) {
-                console.warn(`⚠️ Bot tidak memiliki akses admin di chat ${targetChatId}. Validasi chat dilewati.`);
-                return true;
+            // Jika user tidak ditemukan / bukan participant (sudah keluar)
+            if (errMsg.includes('user not found') || 
+                errMsg.includes('participant') || 
+                errMsg.includes('not a member') || 
+                errMsg.includes('user_not_participant')) {
+                return false;
             }
 
-            // Jika error jelas bahwa user bukan peserta chat
-            if (errMsg.includes('user not found') || errMsg.includes('participant')) {
+            // Jika bot tidak memiliki akses ke chat (misal bot bukan admin di channel atau grup)
+            if (errMsg.includes('chat not found') || 
+                errMsg.includes('member list is inaccessible') || 
+                errMsg.includes('admin') || 
+                errMsg.includes('bot was kicked')) {
+                console.warn(`⚠️ Perhatian: Pastikan Bot sudah diundang & dijadikan Administrator di ${targetChatId}!`);
                 return false;
             }
 
@@ -118,14 +98,11 @@ async function checkMembership(ctx, userId, channelId, groupId, forceCheck = fal
     const joinedChannel = hasValidChannel ? await checkSingleChat(ctx, channelId, userId) : true;
     const joinedGroup = hasValidGroup ? await checkSingleChat(ctx, groupId, userId) : true;
 
-    const result = { channel: joinedChannel, group: joinedGroup, all: joinedChannel && joinedGroup };
-
-    // Simpan ke cache jika sukses terverifikasi
-    if (result.all) {
-        setCachedMembership(userId, result);
-    }
-
-    return result;
+    return { 
+        channel: joinedChannel, 
+        group: joinedGroup, 
+        all: joinedChannel && joinedGroup 
+    };
 }
 
 function generateJoinKeyboard(settings, checkStatus) {
@@ -199,7 +176,7 @@ async function handleStartLogic(ctx, isCallback = false, forceCheck = false) {
         }
 
         if (!isCurrentlyAdmin) {
-            const check = await checkMembership(ctx, userId, settings.channel_id, settings.group_id, forceCheck || isCallback);
+            const check = await checkMembership(ctx, userId, settings.channel_id, settings.group_id);
             if (!check.all) {
                 const msgTeks = !check.channel && !check.group ? settings.msg_not_joined : settings.msg_half_joined;
                 if (isCallback) await ctx.answerCbQuery("❌ Kamu belum bergabung di semua tujuan wajib!", { show_alert: true });
@@ -229,13 +206,12 @@ bot.start(async (ctx) => {
     if (!isPrivateChat(ctx)) {
         return ctx.reply('⚠️ Bot ini hanya bekerja di chat pribadi. Buka chat langsung dengan bot dan ketik /start di sana.');
     }
-    await handleStartLogic(ctx, false, false);
+    await handleStartLogic(ctx, false);
 });
 
 bot.action('check_sub', async (ctx) => { 
     try { await ctx.deleteMessage(); } catch (e) { } 
-    membershipCache.delete(ctx.from.id);
-    await handleStartLogic(ctx, true, true); 
+    await handleStartLogic(ctx, true); 
 });
 
 bot.action('view_profile', async (ctx) => {
